@@ -1,0 +1,187 @@
+desc:PulseDuck - Rhythmic Sidechain Shaper
+// Version 1.1
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Athanasios Emmanouilidis
+// Install: host resource folder / Effects / PulseDuck.jsfx
+// Audio sidechain: send kick channels 1/2 to this track's channels 3/4.
+tags: dynamics modulation sidechain
+in_pin:Main Left
+in_pin:Main Right
+in_pin:Kick Left (3)
+in_pin:Kick Right (4)
+out_pin:Left
+out_pin:Right
+slider1:100<0,100,0.1>Mix (%)
+slider2:0<0,2,1{Tempo Sync,Audio Trigger 3/4,MIDI Note Trigger}>Mode
+slider3:2<0,5,1{1/16,1/8,1/4,1/2,1 bar (4 beats),2 bars (8 beats)}>Cycle length
+slider4:0<0,16,1{Deep Pocket,Tight Kick,Short Dip,Long Kick,Soft House,Slow Bloom,Hard Pump,Fast Return,Sub Space,Rolling,Delayed Rise,Half Gate,Soft Gate,Double Dip,Triplet Pulse,Reverse Swell,Custom}>Curve
+slider5:100<25,200,0.1>Curve duration (Sync capped at 100%)
+slider6:0<0,100,0.1>Sync phase advance (%)
+slider7:0<0,1,1{Full Band,Low Band Only}>Band mode
+slider8:180<20,5000,1>Low band cutoff (Hz)
+slider9:-24<-60,0,0.1>Audio trigger threshold (dBFS)
+slider10:80<5,500,1>Audio retrigger holdoff (ms)
+slider11:2<0.1,20,0.1>Gain smoothing (ms)
+slider12:-1<-1,127,1>MIDI note (-1 = any)
+slider13:0<-18,12,0.1>Output (dB)
+slider14:1<0,1,1{Keep Cycling,Bypass Ducking}>When transport stopped
+slider15:0<0,1,1{Off,On}>Bypass
+slider16:0<0,100,0.1>-Custom node 0
+slider17:0<0,100,0.1>-Custom node 1
+slider18:15<0,100,0.1>-Custom node 2
+slider19:40<0,100,0.1>-Custom node 3
+slider20:65<0,100,0.1>-Custom node 4
+slider21:85<0,100,0.1>-Custom node 5
+slider22:96<0,100,0.1>-Custom node 6
+slider23:100<0,100,0.1>-Custom node 7
+slider24:100<0,100,0.1>-Custom node 8
+
+@init
+// Memory 0..16383 holds MIDI trigger offsets for the current block.
+queue=0; gain=1; wet=0; lowmix=0; outgain=1;
+phase=1; det=0; armed=1; holdoff=0;
+lowL=0; lowR=0; dragging=0;
+function clamp(v lo hi) (min(hi,max(lo,v)););
+function curve(p kind) local(h r e t n a b) (
+  p=clamp(p,0,1);
+  kind==16 ? (
+    t=p*8; n=min(7,floor(t)); t-=n;
+    a=slider(16+n)*0.01; b=slider(17+n)*0.01;
+    t=t*t*(3-2*t); a+(b-a)*t;
+  ) : kind==13 ? (
+    t=p*2-floor(p*2); p>=1 ? 1 : (t<0.16 ? 0 : min(1,pow((t-0.16)/0.65,0.65)));
+  ) : kind==14 ? (
+    t=p*3-floor(p*3); p>=1 ? 1 : (t<0.12 ? 0 : min(1,pow((t-0.12)/0.65,0.7)));
+  ) : kind==15 ? (
+    0.5+0.5*cos(2*$pi*p);
+  ) : (
+    h=0.12; r=0.68; e=0.8;
+    kind==1 ? (h=0.04;r=0.36;e=0.7;);
+    kind==2 ? (h=0.01;r=0.22;e=0.6;);
+    kind==3 ? (h=0.28;r=0.60;e=1.2;);
+    kind==4 ? (h=0.02;r=0.72;e=0.45;);
+    kind==5 ? (h=0.08;r=0.92;e=1.8;);
+    kind==6 ? (h=0.24;r=0.45;e=2;);
+    kind==7 ? (h=0.10;r=0.25;e=0.35;);
+    kind==8 ? (h=0.20;r=0.65;e=0.65;);
+    kind==9 ? (h=0.02;r=0.88;e=0.65;);
+    kind==10 ? (h=0.40;r=0.55;e=0.8;);
+    kind==11 ? (h=0.49;r=0.025;e=1;);
+    kind==12 ? (h=0.35;r=0.35;e=1;);
+    t=clamp((p-h)/r,0,1); t=pow(t,e); t*t*(3-2*t);
+  );
+);
+
+@slider
+cyclebeats=slider3==0 ? 0.25 : slider3==1 ? 0.5 : slider3==2 ? 1 : slider3==3 ? 2 : slider3==4 ? 4 : 8;
+threshold=pow(10,slider9/20);
+hold_samples=slider10*0.001*srate;
+smooth=exp(-1/(slider11*0.001*srate));
+param_smooth=exp(-1/(0.005*srate));
+lpcoef=1-exp(-2*$pi*min(slider8,srate*0.45)/srate);
+detrelease=exp(-1/(0.012*srate));
+
+@block
+inc=max(1,tempo)/(60*srate*cyclebeats);
+playing=(play_state&1)!=0;
+// Reset first, then anchor Sync to the host, including the transition block.
+slider2!=lastmode ? (phase=1;det=0;armed=1;holdoff=0;);
+lastmode=slider2;
+slider2==0 && playing ? (
+  phase=beat_position/cyclebeats;
+  phase-=floor(phase);
+);
+qcount=0;qread=0;samplepos=0;
+while(midirecv(moff,msg1,msg23)) (
+  midisend(moff,msg1,msg23);
+  slider2==2 && (msg1&240)==144 && ((msg23>>8)&127)>0 &&
+    (slider12<0 || (msg23&127)==slider12) && qcount<16384 ? (
+      queue[qcount]=moff;qcount+=1;
+  );
+);
+
+@sample
+// Peak envelope with hysteresis: one trigger per above-threshold excursion.
+side=max(abs(spl2),abs(spl3));
+det=max(side,det*detrelease);
+holdoff=max(0,holdoff-1);
+det<threshold*0.5 ? armed=1;
+slider2==1 && armed && det>=threshold ? (
+  // Consume every threshold crossing, even during holdoff. Do not defer it.
+  armed=0;
+  holdoff<=0 ? (phase=0;holdoff=hold_samples;);
+);
+while(qread<qcount && queue[qread]<=samplepos) (
+  phase=0;qread+=1;
+);
+slider2==0 ? (
+  p=phase+slider6*0.01;p-=floor(p);
+  // Sync cannot extend beyond its next scheduled beat. Cap duration here.
+  shape_phase=p/min(1,slider5*0.01);
+  target=shape_phase>=1 ? 1 : curve(shape_phase,slider4);
+  phase+=inc;phase-=floor(phase);
+) : (
+  // One-shot phase advances over the complete requested duration.
+  // A new trigger can deliberately restart an unfinished curve.
+  target=phase>=1 ? 1 : curve(phase,slider4);
+  phase=min(1,phase+inc/(slider5*0.01));
+);
+// Trigger cycles are one-shots, returning to unity at their end.
+slider14==1 && !playing ? target=1;
+gain=target+(gain-target)*smooth;
+wet_target=slider15 ? 0 : slider1*0.01;
+wet=wet_target+(wet-wet_target)*param_smooth;
+lowmix=slider7+(lowmix-slider7)*param_smooth;
+out_target=slider15 ? 1 : pow(10,slider13/20);
+outgain=out_target+(outgain-out_target)*param_smooth;
+lowL+=lpcoef*(spl0-lowL);
+lowR+=lpcoef*(spl1-lowR);
+// Complementary residual split: low + (input-low) = input exactly.
+duck=wet*(gain-1);
+spl0=(spl0+duck*(spl0+(lowL-spl0)*lowmix))*outgain;
+spl1=(spl1+duck*(spl1+(lowR-spl1)*lowmix))*outgain;
+samplepos+=1;
+
+@gfx 760 360
+gfx_clear=1512209;
+gx=28;gy=90;gw=max(100,gfx_w-56);gh=max(80,gfx_h-145);
+gfx_setfont(1,"Arial",23);gfx_set(0.92,0.95,1,1);
+gfx_x=28;gfx_y=16;gfx_drawstr("PULSE DUCK");
+gfx_setfont(2,"Arial",13);gfx_set(0.52,0.65,0.75,1);
+gfx_x=28;gfx_y=48;gfx_drawstr("RHYTHMIC SIDECHAIN SHAPER  /  16 curves + custom editor");
+gfx_x=28;gfx_y=68;gfx_drawstr("Click and drag in the graph to edit 9 nodes. Select a curve above to restore a preset.");
+gfx_set(0.075,0.11,0.15,1);gfx_rect(gx,gy,gw,gh);
+i=0;loop(9,
+  gfx_set(0.16,0.22,0.28,1);gfx_line(gx+gw*i/8,gy,gx+gw*i/8,gy+gh);i+=1;
+);
+i=0;loop(5,gfx_line(gx,gy+gh*i/4,gx+gw,gy+gh*i/4);i+=1;);
+// Convert the selected preset into stored slider nodes on the first drag.
+pressed=(mouse_cap&1)!=0;
+pressed && !waspressed && mouse_x>=gx && mouse_x<=gx+gw && mouse_y>=gy && mouse_y<=gy+gh ? (
+  slider4!=16 ? (
+    i=0;loop(9,slider(16+i)=curve(i/8,slider4)*100;i+=1;);
+    slider4=16;sliderchange(-1);slider_automate(-1);
+  );
+  dragging=1;
+);
+pressed && dragging ? (
+  node=clamp(floor((mouse_x-gx)/gw*8+0.5),0,8);
+  slider(16+node)=clamp(1-(mouse_y-gy)/gh,0,1)*100;
+  sliderchange(2^(15+node));slider_automate(2^(15+node));
+);
+!pressed ? dragging=0;waspressed=pressed;
+i=0;prevx=gx;prevy=gy+gh*(1-curve(0,slider4));
+loop(257,
+  xx=gx+gw*i/256;yy=gy+gh*(1-curve(i/256,slider4));
+  gfx_set(0.2,0.88,0.74,1);gfx_line(prevx,prevy,xx,yy);
+  prevx=xx;prevy=yy;i+=1;
+);
+slider4==16 ? (
+  i=0;loop(9,gfx_circle(gx+gw*i/8,gy+gh*(1-slider(16+i)*0.01),4,1);i+=1;);
+);
+gfx_set(1,0.72,0.32,0.85);
+// Curve editor shows unscaled shape; marker reflects scaled playback position.
+marker=slider2==0 ? min(1,p/min(1,slider5*0.01)) : phase;
+gfx_line(gx+gw*marker,gy,gx+gw*marker,gy+gh);
+gfx_set(0.85,0.91,0.95,1);gfx_x=gx;gfx_y=gy+gh+13;
+gfx_printf("Mix %.0f%%   |   Envelope reduction %.1f dB   |   SC %.1f dBFS",slider1,-20*log10(max(0.000001,1+wet*(gain-1))),20*log10(max(det,0.000001)));
